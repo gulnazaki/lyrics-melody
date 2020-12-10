@@ -5,6 +5,7 @@ from polyglot.detect import Detector
 import json
 import jsonlines
 import csv
+import pandas as pd
 from multiprocessing import Process
 
 def valid_lyrics(lyrics):
@@ -102,13 +103,14 @@ def load(lmd_path, chunk, tmp_output, include_filenames, include_lyrics, instrum
 	with jsonlines.open(tmp_output, 'w') as writer:
 		writer.write_all(midi_stream)
 
-def multiprocessing_load(lmd_path, match_scores_path, output, workers, csv_for_selected, include_filenames, include_lyrics, instrumental_type):
+def multiprocessing_load(lmd_path, match_scores_path, output, workers, csv_for_selected, include_filenames, include_lyrics, instrumental_type, convert_to_parquet):
 	if csv_for_selected:
-		import pandas
 		try:
-			df = pandas.read_csv(csv_for_selected, usecols=["file"])
+			df = pd.read_csv(csv_for_selected, usecols=["file"])
 		except ValueError:
 			exit("The provided csv doesn't have a 'file' column")
+		except:
+			exit("Error with provided csv")
 		sorted_matches = list(df['file'])
 	else:
 		with open(match_scores_path, 'r') as f:
@@ -149,6 +151,11 @@ def multiprocessing_load(lmd_path, match_scores_path, output, workers, csv_for_s
 		writer.writeheader()
 		writer.writerows(data_stream)
 	
+	if convert_to_parquet:
+		df = pd.read_csv("{}.csv".format(output))
+		df.to_parquet("{}.parquet".format(output))
+		os.remove("{}.csv".format(output))
+
 	for tmp_output in tmp_outputs:
 		os.remove(tmp_output)
 
@@ -165,6 +172,7 @@ if __name__ == '__main__':
 	parser.add_argument('--no-filenames', '-nf', action='store_true', help="Don't include filenames in the output")
 	parser.add_argument('--no-lyrics', '-nl', action='store_true', help="Don't include lyrics in the output")
 	parser.add_argument('--instrumental-type', '-it', default=1, type=int, help="Polyphonic instrumental format : 1, monophonic : 2, both : 3")
+	parser.add_argument('--convert-to-parquet', '-cpt', action='store_true', help="Convert to parquet for faster reading and smaller size")
 
 	args = parser.parse_args()
 	
@@ -178,4 +186,5 @@ if __name__ == '__main__':
 		 				 csv_for_selected=args.csv_for_selected,
 		 				 include_filenames=not args.no_filenames,
 		 				 include_lyrics=not args.no_lyrics,
-		 				 instrumental_type=args.instrumental_type)
+		 				 instrumental_type=args.instrumental_type,
+		 				 convert_to_parquet=args.convert_to_parquet)

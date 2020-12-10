@@ -26,6 +26,7 @@ class Midi(pretty_midi.PrettyMIDI):
 				self._find_vocal_instrument()
 				if not self.is_instrumental:
 					self._create_sung_lyrics()
+					self._trim_overlapped_vocals()
 
 
 	def _reclassify_lyrics_and_text(self):
@@ -108,6 +109,13 @@ class Midi(pretty_midi.PrettyMIDI):
 				key = list(note_dict.keys())[idx]
 				self.lyrics_sung.append(Lyric_Sung(l.text, note_dict[key]))
 				del note_dict[key]
+
+
+	def _trim_overlapped_vocals(self):
+		ls = self.lyrics_sung
+		for i in range(len(ls) - 1):
+			if ls[i].note.end > ls[i+1].note.start:
+				ls[i].note.end = ls[i+1].note.start
 
 
 	def instrumental_text_format(self, monophonic=False):
