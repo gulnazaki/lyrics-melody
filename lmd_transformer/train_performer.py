@@ -104,10 +104,10 @@ class MidiDataset(Dataset):
     def decode(self, event_sequence, is_input, mask=None):
         size = len(event_sequence)
         if mask is not None:
-          mask = mask.tolist()
-          true_size = len([v for v in mask if v])
+            mask = mask.tolist()
+            true_size = len([v for v in mask if v])
         else:
-          true_size = size
+            true_size = size
         if is_input:
             return ",".join([self.reverse_input_vocab[i.item()] for i in event_sequence[:true_size]])
         else:
@@ -118,11 +118,11 @@ def collate_fn_zero_pad(batch):
     batch_size = len(inputs)
 
     if batch_size == 1:
-      inputs = inputs[0].view(1, -1)
-      outputs = outputs[0].view(1, -1)
-      input_masks = torch.ones_like(inputs).bool()
-      output_masks = torch.ones_like(outputs).bool()
-      return (inputs.long(), input_masks), (outputs.long(), output_masks)
+        inputs = inputs[0].view(1, -1)
+        outputs = outputs[0].view(1, -1)
+        input_masks = torch.ones_like(inputs).bool()
+        output_masks = torch.ones_like(outputs).bool()
+        return (inputs.long(), input_masks), (outputs.long(), output_masks)
 
     input_lengths = [seq.size(0) for seq in inputs]
     input_max_length = max(input_lengths)
@@ -158,15 +158,18 @@ if __name__ == '__main__':
     torch.manual_seed(0)
     train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
 
-    writer = SummaryWriter(log_dir='drive/MyDrive/lmd_transformer/small_train/')
+    writer_train = SummaryWriter(log_dir='drive/MyDrive/lmd_transformer/small/train')
+    writer_val = SummaryWriter(log_dir='drive/MyDrive/lmd_transformer/small/val')
     bleu = BLEU()
 
     model = PerformerEncDec(
-        dim = 1024,
+        dim = 512,
         enc_heads = 8,
         dec_heads = 8,
         enc_depth = 6,
         dec_depth = 6,
+        enc_ff_chunks = 10,
+        dec_ff_chunks = 10,
         enc_num_tokens = len(dataset.input_vocab),
         dec_num_tokens = len(dataset.output_vocab),
         enc_max_seq_len = dataset.max_input_length,
@@ -183,36 +186,49 @@ if __name__ == '__main__':
 
     model_engine, optimizer, trainloader, _ = deepspeed.initialize(args=args, model=model, model_parameters=model.parameters(),  training_data=train_dataset, collate_fn=collate_fn_zero_pad)
     device = model_engine.local_rank
-    
-    torch.manual_seed(torch.initial_seed())
+
     val_loader_ = DataLoader(val_dataset, batch_size=1, shuffle=True, collate_fn=collate_fn_zero_pad)
     val_loader = cycle(val_loader_)
-    
-    print("Dataset maximum sequence lengths - Input: {}, Output: {}".format(dataset.max_input_length, dataset.max_output_length))
-    print("Train Dataset - size: {}, batches: {}".format(len(train_dataset), len(trainloader)))
-    print("Validate Dataset - size: {}, batches: {}".format(len(val_dataset), len(val_loader_)))
+
 
     i = None
-    # checkpoint_name, client_state = model_engine.load_checkpoint('drive/MyDrive/lmd_transformer/small_train/', tag='latest')
-    # print("Loaded checkpoint: {}".format(checkpoint_name))
-    
-    # i = client_state['i']
-    # i += 1
-    # step, epoch = divmod(i, len(trainloader))
-    # print("Epoch: {}, step: {}, i: {}".format(epoch, step, i))
-    # print("Advancing dataloader...")
-    # for _ in tqdm(range(step)):
-    #   next(iter(trainloader))
+    trainloader = iter(trainloader)
+    checkpoint_name, client_state = model_engine.load_checkpoint('drive/MyDrive/lmd_transformer/small/')
+
+    print("\n", "Dataset maximum sequence lengths - Input: {}, Output: {}".format(dataset.max_input_length, dataset.max_output_length), "\n")
+    print("\n", "Train Dataset - size: {}, batches: {}".format(len(train_dataset), len(trainloader.dataloader)), "\n")
+    print("\n", "Validate Dataset - size: {}, batches: {}".format(len(val_dataset), len(val_loader_)), "\n")
+
+    if checkpoint_name is not None:
+        print("\nLoaded checkpoint: {}\n".format(checkpoint_name))        
+        i = client_state['i']
+        i += 1
+        epoch, step = divmod(i, len(trainloader.dataloader))
+        print("Epoch: {}, step: {}, i: {}".format(epoch, step, i))
+        print("Advancing dataloader...")
+        for _ in tqdm(range(step)):
+            next(trainloader)
+    else:
+        print("\nNo checkpoint found, training from scratch\n")
 
     if i is None:
-      i = 0
-      step = 0
-      epoch = 0
+        i = 0
+        step = 0
+        epoch = 0
 
     for e in range(args.epochs - epoch):
         running_loss = 0
         print("EPOCH: {}".format(e + epoch))
-        for step, data in enumerate(trainloader):
+        while True:
+            try:
+                data = next(trainloader)
+            except StopIteration:
+                ckpt_id = "end_of_epoch_{}-{}-{}".format(e + epoch, i - 1, loss.item())
+                model_engine.save_checkpoint('drive/MyDrive/lmd_transformer/small/', tag=ckpt_id, client_state = {'i' : i - 1})
+                step = 0
+                trainloader = iter(trainloader)
+                break
+
             model_engine.train()
             (inp, inp_mask), (out, out_mask) = data
             loss = model_engine(inp.to(device), out.to(device), enc_mask=inp_mask.to(device), dec_mask=out_mask.to(device), return_loss=True)
@@ -220,11 +236,11 @@ if __name__ == '__main__':
             model_engine.step()
             running_loss += loss.item()
             if step % 20 == 0:
-              avg_loss = running_loss / 20 if step > 0 else running_loss
-              print("training loss: {}".format(avg_loss))
-              writer.add_scalar("Loss/train", avg_loss, i)
-              writer.flush()
-              running_loss = 0
+                avg_loss = running_loss / 20 if step > 0 else running_loss
+                print("training loss: {}".format(avg_loss))
+                writer_train.add_scalar("Loss/train", avg_loss, i)
+                writer_train.flush()
+                running_loss = 0
 
             if step % args.validate_every == 0:
                 model_engine.eval()
@@ -235,31 +251,32 @@ if __name__ == '__main__':
                         loss = model_engine(inp.to(device), out.to(device), return_loss=True, enc_mask=inp_mask.to(device), dec_mask=out_mask.to(device))
                         running_eval_loss += loss.item()
                     print('\n', f'validation loss: {running_eval_loss / 40}', '\n')
-                    writer.add_scalar("Loss/evaluate", running_eval_loss / 40, i)
-                    writer.flush()
+                    writer_val.add_scalar("Loss/evaluate", running_eval_loss / 40, i)
+                    writer_val.flush()
+                    running_eval_loss = 0
 
             if step % args.generate_every == 0:
                 (inp, inp_mask), (expected_out, expected_out_mask) = next(val_loader)
                 print(dataset.decode(inp[0], is_input=True, mask=inp_mask[0]))
-                print(dataset.decode(expected_out[0], is_input=False, mask=expected_out_mask[0]))
+                print(dataset.decode(expected_out[0][1:], is_input=False, mask=expected_out_mask[0][1:]))
 
                 inp = inp[0].view(1, -1)
                 inp_mask = inp_mask[0].view(1, -1)
                 # <bos> token
                 initial = torch.ones(1,1).long()
 
-                out = model_engine.module.generate(inp.to(device), initial.to(device), enc_mask=inp_mask.to(device), seq_len=len(expected_out[0]), eos_token=2)
+                out = model_engine.module.generate(inp.to(device), initial.to(device), enc_mask=inp_mask.to(device), seq_len=len(expected_out[0]) - 2, eos_token=2)
                 print(dataset.decode(out[0], is_input=False))
                 
-                bleu(out.to(device), expected_out.to(device))
+                bleu(out.to(device), expected_out[:, 1:].to(device))
                 b = bleu.get_metric(reset=True)['BLEU']
                 print("BLEU metric: {}".format(b))
-                writer.add_scalar("BLEU", b, i)
-                writer.flush()
-            
-            if step > 0 and i % 1000 == 0:
-                ckpt_id = "{}-{}-{}".format(e + epoch, i, loss.item())
-                model_engine.save_checkpoint('drive/MyDrive/lmd_transformer/small_train/', tag=ckpt_id, client_state = {'i' : i})
-                model_engine.save_checkpoint('drive/MyDrive/lmd_transformer/small_train/', tag='latest', client_state = {'i' : i})
-            i += 1
+                writer_val.add_scalar("BLEU", b, i)
+                writer_val.flush()
 
+            if step == 700 :
+                ckpt_id = "midepoch_{}-{}-{}".format(e + epoch, i, loss.item())
+                model_engine.save_checkpoint('drive/MyDrive/lmd_transformer/small/', tag=ckpt_id, client_state = {'i' : i})
+            
+            i += 1
+            step += 1
