@@ -163,12 +163,12 @@ def valid_structure_metric(sequence, vocab_size):
     def get_note(e, on):
         if on:
             e -= ons[0]
-            e %= 32
+            e //= 32
         else:
             e -= offs[0]
         return e + 21
 
-    def set_valids_for_next(e):
+    def get_valids_for_next(e, last_note_on):
         if e == waits[-1]:
             valid_events = waits + offs + syllables + ons
         elif e in waits:
@@ -181,7 +181,9 @@ def valid_structure_metric(sequence, vocab_size):
             valid_events = waits + syllables + ons
         else:
             valid_events = ons
+        return valid_events, last_note_on
 
+    sequence = sequence.tolist()
     waits = list(range(3, 1003))
     ons = list(range(1003, 3819))
     offs = list(range(3819, 3907))
@@ -195,7 +197,7 @@ def valid_structure_metric(sequence, vocab_size):
         (e not in ons or last_note_on is None) and \
         (e not in offs or get_note(e, on=False) == last_note_on):
             valid_count += 1
-        set_valids_for_next(e)
+        valid_events, last_note_on = get_valids_for_next(e, last_note_on)
 
     size = len(sequence) - 1 if sequence[-1] == 2 else len(sequence)
     return valid_count / size
