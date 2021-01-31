@@ -26,16 +26,17 @@ def is_english(text):
 
 
 class MIDIStream(list):
-	def __init__(self, lmd_path, track_matches, include_filenames, include_lyrics, instrumental_type):
+	def __init__(self, lmd_path, track_matches, include_filenames, include_lyrics, instrumental_type, include_velocity):
 		self.lmd_path = lmd_path
 		self.track_matches = track_matches
 		self.include_filenames = include_filenames
 		self.include_lyrics = include_lyrics
 		self.instrumental_type = instrumental_type
+		self.include_velocity = include_velocity
 
 	def __iter__(self):
 		for match in self.track_matches:
-			data = self.select_midi(match)
+			data = self.select_midi(match, self.include_velocity)
 			if data is not None:
 				data_dict = {}
 				if self.include_filenames:
@@ -49,7 +50,7 @@ class MIDIStream(list):
 				data_dict['vocal'] = json.dumps(data[4])
 				yield (data_dict)
 
-	def select_midi(self, match):
+	def select_midi(self, match, include_velocity):
 		if isinstance(match, tuple):
 			track, midis = match
 			trackpath = os.path.join(track[2], track[3], track[4], track)
@@ -75,9 +76,9 @@ class MIDIStream(list):
 				else:
 					return (midipath,
 							lyrics,
-							midi.instrumental_text_format(),
-							midi.instrumental_text_format(monophonic=True),
-							midi.vocal_text_format())
+							midi.instrumental_text_format(include_velocity=include_velocity),
+							midi.instrumental_text_format(monophonic=True, include_velocity=include_velocity),
+							midi.vocal_text_format(include_velocity=include_velocity))
 		return None
 
 	def __len__(self):
@@ -98,19 +99,19 @@ class DataStream(list):
 		return 1
 
 
-def load(lmd_path, chunk, tmp_output, include_filenames, include_lyrics, instrumental_type):
-	midi_stream = MIDIStream(lmd_path, chunk, include_filenames, include_lyrics, instrumental_type)
+def load(lmd_path, chunk, tmp_output, include_filenames, include_lyrics, instrumental_type, include_velocity):
+	midi_stream = MIDIStream(lmd_path, chunk, include_filenames, include_lyrics, instrumental_type, include_velocity)
 	with jsonlines.open(tmp_output, 'w') as writer:
 		writer.write_all(midi_stream)
 
-def multiprocessing_load(lmd_path, match_scores_path, output, workers, csv_for_selected, include_filenames, include_lyrics, instrumental_type, convert_to_parquet):
-	if csv_for_selected:
+def multiprocessing_load(lmd_path, match_scores_path, output, workers, parquet_for_selected, include_filenames, include_lyrics, instrumental_type, convert_to_parquet, include_velocity):
+	if parquet_for_selected:
 		try:
-			df = pd.read_csv(csv_for_selected, usecols=["file"])
+			df = pd.read_parquet(parquet_for_selected, columns=["file"])
 		except ValueError:
-			exit("The provided csv doesn't have a 'file' column")
+			exit("The provided parquet doesn't have a 'file' column")
 		except:
-			exit("Error with provided csv")
+			exit("Error with provided parquet")
 		sorted_matches = list(df['file'])
 	else:
 		with open(match_scores_path, 'r') as f:
@@ -123,7 +124,7 @@ def multiprocessing_load(lmd_path, match_scores_path, output, workers, csv_for_s
 	tmp_outputs = []
 	for i, chunk in enumerate(track_chunks):
 		tmp_output = "{}-{}.jsonl".format(output, i)
-		j = Process(target=load, args=(lmd_path, chunk, tmp_output, include_filenames, include_lyrics, instrumental_type))
+		j = Process(target=load, args=(lmd_path, chunk, tmp_output, include_filenames, include_lyrics, instrumental_type, include_velocity))
 		jobs.append(j)
 		tmp_outputs.append(tmp_output)
 	
@@ -168,23 +169,25 @@ if __name__ == '__main__':
 	parser.add_argument('--match-scores-path', '-ms', type=str, help='Path of the match_scores.json')
 	parser.add_argument('--output', '-o', type=str, default='dataset', help='Base filename to save the temporary jsonl files and the data csv')
 	parser.add_argument('--workers', '-n', default=4, type=int, help='Number of processes to spawn')
-	parser.add_argument('--csv-for-selected', '-csv', type=str, help='Path of a csv that contains the already selected midis, overrides match scores')
+	parser.add_argument('--parquet-for-selected', '-pfs', type=str, help='Path of a parquet file that contains the already selected midis, overrides match scores')
 	parser.add_argument('--no-filenames', '-nf', action='store_true', help="Don't include filenames in the output")
 	parser.add_argument('--no-lyrics', '-nl', action='store_true', help="Don't include lyrics in the output")
 	parser.add_argument('--instrumental-type', '-it', default=1, type=int, help="Polyphonic instrumental format : 1, monophonic : 2, both : 3")
 	parser.add_argument('--convert-to-parquet', '-cpt', action='store_true', help="Convert to parquet for faster reading and smaller size")
+	parser.add_argument('--include-velocity', '-iv', action='store_true', help='Include velocity in the dataset')
 
 	args = parser.parse_args()
 	
-	if not args.match_scores_path and not args.csv_for_selected:
-		exit("Provide match scores or csv with selected midis")
+	if not args.match_scores_path and not args.parquet_for_selected:
+		exit("Provide match scores or parquet with selected midis")
 	
 	multiprocessing_load(lmd_path=args.lmd_path,
 		 				 match_scores_path=args.match_scores_path,
 		 				 output=args.output,
 		 				 workers=args.workers,
-		 				 csv_for_selected=args.csv_for_selected,
+		 				 parquet_for_selected=args.parquet_for_selected,
 		 				 include_filenames=not args.no_filenames,
 		 				 include_lyrics=not args.no_lyrics,
 		 				 instrumental_type=args.instrumental_type,
-		 				 convert_to_parquet=args.convert_to_parquet)
+		 				 convert_to_parquet=args.convert_to_parquet,
+		 				 include_velocity=args.include_velocity)

@@ -41,7 +41,7 @@ windows_chars = {
 }
 
 windows_regex = re.compile('(' + '|'.join(windows_chars.keys()) + ')')
-clean_regex = re.compile(r"-|[^A-Z \n']+")
+clean_regex = re.compile(r"-|[^A-Za-z \n']+")
 space_regex = re.compile(r"\s+")
 
 def lyrics_margin(tempi):
@@ -59,12 +59,12 @@ def valid_lyric(time, text):
 	return time != 0 and not any(t in text.lower() for t in ['karaoke', 'www.', '.com', 'http', 'instrumental']) \
 					 and not all(t in text for t in ['(', ')'])
 
-def clear_and_upper(lyrics):
+def clear_text(lyrics, upper_text):
 	clean_lyrics = []
 	for l in lyrics:
-		c_text = clean_regex.sub(lambda match: " " if match.group(0) == "-" else "", l.text.upper())
+		c_text = clean_regex.sub(lambda match: " " if match.group(0) == "-" else "", l.text.upper() if upper_text else l.text)
 		c_text = space_regex.sub(" ", c_text)
-		l.text = c_text.lstrip()
+		l.text = c_text.rstrip()
 		if l.text and len(l.text) <= MAX_CHARS and len(l.text.split()) <= MAX_WORDS :
 			clean_lyrics.append(l)
 	return clean_lyrics
@@ -167,7 +167,7 @@ def valid_event(note_on, instrument, pitch, time, will_end_at, monophonic):
 	else:
 		return False
 
-def text_format(events, monophonic=False):
+def text_format(events, monophonic=False, include_velocity=True):
 	last_note_tick = 0
 	last_lyric = None
 	event_text_format = []
@@ -194,10 +194,13 @@ def text_format(events, monophonic=False):
 			last_lyric = lyric
 		
 		if note_on:
-			velocity = (note_event.velocity // VEL_QUANT) * VEL_QUANT + (VEL_QUANT >> 1)
-			event_text_format.append('{}ON_{}_V{}'.format(instrument + '_' if instrument != 'Vocal' else '', pitch, velocity))
+			velocity = '_V{}'.format((note_event.velocity // VEL_QUANT) * VEL_QUANT + (VEL_QUANT >> 1)) if include_velocity else ''
+			event_text_format.append('{}ON_{}{}'.format(instrument + '_' if instrument != 'Vocal' else '', pitch, velocity))
 		else:
-			event_text_format.append('{}OFF_{}'.format(instrument + '_' if instrument != 'Vocal' else '', pitch))			
+			if instrument == 'Vocal':
+				event_text_format.append('_OFF_')
+			else:
+				event_text_format.append('{}_OFF_{}'.format(instrument, pitch))			
 		
 		last_note_tick = note_event.time
 

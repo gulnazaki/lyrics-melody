@@ -4,14 +4,14 @@ from heapq import merge
 from collections import OrderedDict
 
 class Midi(pretty_midi.PrettyMIDI):
-	def __init__(self, midi_file=None, resolution=220, initial_tempo=120.):
+	def __init__(self, midi_file=None, resolution=220, initial_tempo=120., upper_text=False):
 		super().__init__(midi_file, resolution, initial_tempo)
 		
 		if midi_file is not None:
 			self.lyrics_margin = lyrics_margin(self.get_tempo_changes()[1])
 			self._reclassify_lyrics_and_text()
 			self._embed_whitespaces()
-			self.lyrics = clear_and_upper(self.lyrics)
+			self.lyrics = clear_text(self.lyrics, upper_text=upper_text)
 			self._sort_notes_and_lyrics()
 			
 			self.__lyrics_times = OrderedDict([(l.time, l) for l in self.lyrics])
@@ -43,24 +43,36 @@ class Midi(pretty_midi.PrettyMIDI):
 
 	def _embed_whitespaces(self):
 		lyrics = []
+		after_spaces = 0
+		
+		ls = "".join([l.text for l in self.lyrics])
+		upper = False
+		lower = False
+		if ls.isupper():
+			upper = True
+		elif ls.islower():
+			lower = True
+		capitalize = lambda s: ' ' * (len(s) - len(s.lstrip())) + s.lstrip().capitalize()
+		
 		for l in self.lyrics:
 			if not l.text.isspace() and l.text != '':
-				if l.text[0] == '\\':
-					l.text = l.text[1:]
-					if lyrics:
-						lyrics[-1].text += '\n\n'
-				elif l.text[0] == '/':
+				if l.text[0] == '\\' or l.text[0] == '/':
 					l.text = l.text[1:]
 					if lyrics:
 						lyrics[-1].text += '\n'
 				
-				no_trailing = l.text.lstrip()
-				trailing_spaces = len(l.text) - len(no_trailing)
-				if trailing_spaces:
-					l.text = no_trailing
-					if lyrics:
-						lyrics[-1].text += ' ' * trailing_spaces
+				l.text = ' ' *  after_spaces + l.text
+				no_after_spaces = l.text.rstrip()
+				after_spaces = len(l.text) - len(no_after_spaces)
+				l.text = no_after_spaces
 			
+				l.text = l.text.lower() if upper else l.text
+				if lower or upper:
+					if lyrics:
+						l.text = capitalize(l.text) if '\n' in lyrics[-1].text else l.text
+					else:
+						l.text = capitalize(l.text)
+
 				lyrics.append(l)
 			else:
 				if lyrics:
@@ -118,7 +130,7 @@ class Midi(pretty_midi.PrettyMIDI):
 				ls[i].note.end = ls[i+1].note.start
 
 
-	def instrumental_text_format(self, monophonic=False):
+	def instrumental_text_format(self, monophonic=False, include_velocity=True):
 		note_events = []
 		for instrument in self.other_instruments:
 			ins_class = instrument_to_general_class(instrument)
@@ -133,10 +145,10 @@ class Midi(pretty_midi.PrettyMIDI):
 
 		instrumental_note_events = sorted(note_events, key=lambda x: (x.time, -x.will_end_at))
 
-		return text_format(instrumental_note_events, monophonic=monophonic)
+		return text_format(instrumental_note_events, monophonic=monophonic, include_velocity=include_velocity)
 
 
-	def vocal_text_format(self, max_size=None):
+	def vocal_text_format(self, include_velocity=True):
 		note_events = []
 		for l in self.lyrics_sung:
 			note = l.note
@@ -151,7 +163,7 @@ class Midi(pretty_midi.PrettyMIDI):
 
 		vocal_note_events = sorted(note_events, key=lambda x: (x.time, -x.will_end_at))
 
-		return text_format(vocal_note_events)
+		return text_format(vocal_note_events, include_velocity=include_velocity)
 
 
 class Lyric_Sung(object):

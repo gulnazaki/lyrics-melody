@@ -200,7 +200,10 @@ def valid_structure_metric(sequence, vocab_size):
         valid_events, last_note_on = get_valids_for_next(e, last_note_on)
 
     size = len(sequence) - 1 if sequence[-1] == 2 else len(sequence)
-    return valid_count / size
+    if size == 0:
+        return 0
+    else:
+        return valid_count / size
 
 
 if __name__ == '__main__':
@@ -241,18 +244,16 @@ if __name__ == '__main__':
         dec_num_tokens = len(dataset.output_vocab),
         enc_max_seq_len = dataset.max_input_length,
         dec_max_seq_len = dataset.max_output_length,
-        ignore_index = 0,
-        pad_value = 0,
         enc_emb_dropout = 0.1,
         dec_emb_dropout = 0.1,
         enc_ff_dropout = 0.1,
         dec_ff_dropout = 0.1,
         enc_attn_dropout = 0.1,
         dec_attn_dropout = 0.1,
+        enc_tie_embed = True,
+        dec_tie_embed = True,
         enc_reversible = True,
         dec_reversible = True,
-        enc_amp_enabled = True,
-        dec_amp_enabled = True
     ).to(device)
 
     model_engine, optimizer, trainloader, _ = deepspeed.initialize(args=args, model=model, model_parameters=model.parameters(),  training_data=train_dataset, collate_fn=collate_fn_zero_pad)
@@ -277,16 +278,13 @@ if __name__ == '__main__':
     print("\n", "Validate Dataset - size: {}, batches: {}".format(len(val_dataset), len(val_loader_)), "\n")
 
     checkpoint_name, client_state = model_engine.load_checkpoint(args.save_dir, load_module_strict=False)
+    # checkpoint_name = None
 
     if checkpoint_name is not None:
         print("\nLoaded checkpoint: {}\n".format(checkpoint_name))        
         i = client_state['i']
         i += 1
         epoch, step = divmod(i, num_batches)
-        if 'step' in client_state:
-            assert step == client_state['step']
-        if 'epoch' in client_state:
-            assert epoch == client_state['epoch']
         print("Epoch: {}, step: {}, i: {}".format(epoch, step, i))
         if step == 0:
             print("Starting next epoch...")
@@ -353,8 +351,10 @@ if __name__ == '__main__':
 
             if step % args.generate_every == 0:
                 (inp, inp_mask), (expected_out, expected_out_mask) = next(val_loader)
-                print(dataset.decode(inp[0], is_input=True, mask=inp_mask[0]))
-                print(dataset.decode(expected_out[0][1:], is_input=False, mask=expected_out_mask[0][1:]))
+                decoded_inp = dataset.decode(inp[0], is_input=True, mask=inp_mask[0])
+                decoded_expected_out = dataset.decode(expected_out[0][1:], is_input=False, mask=expected_out_mask[0][1:])
+                print(decoded_inp)
+                print(decoded_expected_out)
 
                 inp = inp[0].view(1, -1)
                 inp_mask = inp_mask[0].view(1, -1)
@@ -363,7 +363,11 @@ if __name__ == '__main__':
                 initial = torch.ones(1,1).long()
 
                 out = model_engine.module.generate(inp.to(device), initial.to(device), enc_mask=inp_mask.to(device), seq_len=len(expected_out[0]) - 2, eos_token=2)
-                print(dataset.decode(out[0], is_input=False))
+                decoded_out = dataset.decode(out[0], is_input=False)
+                print(decoded_out)
+
+                with open(os.path.join(args.save_dir, 'outputs.txt'), 'a') as f:
+                    f.write(decoded_inp + "\n" + decoded_expected_out + '\n' + decoded_out + '\n\n')
                 
                 bleu(out.to(device), expected_out[:, 1:].to(device))
                 b = bleu.get_metric(reset=True)['BLEU']
