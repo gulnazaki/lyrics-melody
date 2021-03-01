@@ -17,26 +17,33 @@ def valid_lyrics(lyrics):
 
 def is_english(text):
 	try:
-		lang = Detector(text).language.name
+		det = Detector(text)
+		lang = det.language.name
+		reliable = det.reliable
 	except:
 		return False
-	if lang != "English":
+	if lang != "English" or not reliable:
 		return False
 	return True
 
 
 class MIDIStream(list):
-	def __init__(self, lmd_path, track_matches, include_filenames, include_lyrics, instrumental_type, include_velocity):
+	def __init__(self, lmd_path, track_matches, **kwargs):
 		self.lmd_path = lmd_path
 		self.track_matches = track_matches
-		self.include_filenames = include_filenames
-		self.include_lyrics = include_lyrics
-		self.instrumental_type = instrumental_type
-		self.include_velocity = include_velocity
+		self.include_filenames = kwargs['include_filenames']
+		self.include_lyrics = kwargs['include_lyrics']
+		self.instrumental_type = kwargs['instrumental_type']
+		self.include_velocity = kwargs['include_velocity']
+		self.include_phonemes = kwargs['include_phonemes']
+		self.include_vowels = kwargs['include_vowels']
+		self.include_syllables = kwargs['include_syllables']
+		self.norm_resolution = kwargs['norm_resolution']
+		self.music_analysis = kwargs['music_analysis']
 
 	def __iter__(self):
 		for match in self.track_matches:
-			data = self.select_midi(match, self.include_velocity)
+			data = self.select_midi(match, self.include_velocity, self.include_phonemes, self.include_vowels, self.include_syllables, self.norm_resolution, self.music_analysis, self.instrumental_type >= 2)
 			if data is not None:
 				data_dict = {}
 				if self.include_filenames:
@@ -50,7 +57,7 @@ class MIDIStream(list):
 				data_dict['vocal'] = json.dumps(data[4])
 				yield (data_dict)
 
-	def select_midi(self, match, include_velocity):
+	def select_midi(self, match, include_velocity, include_phonemes, include_vowels, include_syllables, norm_resolution, music_analysis, include_monophonic=False):
 		if isinstance(match, tuple):
 			track, midis = match
 			trackpath = os.path.join(track[2], track[3], track[4], track)
@@ -61,10 +68,11 @@ class MIDIStream(list):
 		for m in midis:
 			midipath = os.path.join(trackpath, m) + ".mid"
 			try:
-				midi = load_midi.Midi(os.path.join(self.lmd_path, midipath))
+				midi = load_midi.Midi(os.path.join(self.lmd_path, midipath), norm_resolution=norm_resolution, music_analysis=music_analysis)
 			except KeyboardInterrupt:
 				exit()
-			except:
+			except Exception as e:
+				print(e, midipath)
 				continue
 
 			if midi.is_instrumental:
@@ -77,8 +85,11 @@ class MIDIStream(list):
 					return (midipath,
 							lyrics,
 							midi.instrumental_text_format(include_velocity=include_velocity),
-							midi.instrumental_text_format(monophonic=True, include_velocity=include_velocity),
-							midi.vocal_text_format(include_velocity=include_velocity))
+							midi.instrumental_text_format(monophonic=True, include_velocity=include_velocity) if include_monophonic else [],
+							midi.vocal_text_format(include_velocity=include_velocity,
+												   include_phonemes=include_phonemes,
+												   include_vowels=include_vowels,
+												   include_syllables=include_syllables))
 		return None
 
 	def __len__(self):
@@ -99,12 +110,12 @@ class DataStream(list):
 		return 1
 
 
-def load(lmd_path, chunk, tmp_output, include_filenames, include_lyrics, instrumental_type, include_velocity):
-	midi_stream = MIDIStream(lmd_path, chunk, include_filenames, include_lyrics, instrumental_type, include_velocity)
+def load(lmd_path, chunk, tmp_output, **kwargs):
+	midi_stream = MIDIStream(lmd_path, chunk, **kwargs)
 	with jsonlines.open(tmp_output, 'w') as writer:
 		writer.write_all(midi_stream)
 
-def multiprocessing_load(lmd_path, match_scores_path, output, workers, parquet_for_selected, include_filenames, include_lyrics, instrumental_type, convert_to_parquet, include_velocity):
+def multiprocessing_load(lmd_path, match_scores_path, output, workers, parquet_for_selected, convert_to_parquet, **kwargs):
 	if parquet_for_selected:
 		try:
 			df = pd.read_parquet(parquet_for_selected, columns=["file"])
@@ -124,7 +135,7 @@ def multiprocessing_load(lmd_path, match_scores_path, output, workers, parquet_f
 	tmp_outputs = []
 	for i, chunk in enumerate(track_chunks):
 		tmp_output = "{}-{}.jsonl".format(output, i)
-		j = Process(target=load, args=(lmd_path, chunk, tmp_output, include_filenames, include_lyrics, instrumental_type, include_velocity))
+		j = Process(target=load, args=(lmd_path, chunk, tmp_output), kwargs=kwargs)
 		jobs.append(j)
 		tmp_outputs.append(tmp_output)
 	
@@ -137,13 +148,13 @@ def multiprocessing_load(lmd_path, match_scores_path, output, workers, parquet_f
 	data_stream = DataStream(tmp_outputs)
 
 	csv_columns = []
-	if include_filenames:
+	if kwargs['include_filenames']:
 		csv_columns.append('file')
-	if include_lyrics:
+	if kwargs['include_lyrics']:
 		csv_columns.append('lyrics')
-	if instrumental_type % 2 == 1:
+	if kwargs['instrumental_type'] % 2 == 1:
 		csv_columns.append('instrumental')
-	if instrumental_type >= 2:
+	if kwargs['instrumental_type'] >= 2:
 		csv_columns.append('monophonic')
 	csv_columns.append('vocal')
 
@@ -175,6 +186,11 @@ if __name__ == '__main__':
 	parser.add_argument('--instrumental-type', '-it', default=1, type=int, help="Polyphonic instrumental format : 1, monophonic : 2, both : 3")
 	parser.add_argument('--convert-to-parquet', '-cpt', action='store_true', help="Convert to parquet for faster reading and smaller size")
 	parser.add_argument('--include-velocity', '-iv', action='store_true', help='Include velocity in the dataset')
+	parser.add_argument('--include-phonemes', '-iphon', action='store_true', help='Include phonemes in the dataset')
+	parser.add_argument('--include-vowels', '-ivow', action='store_true', help='Include vowels in the dataset')
+	parser.add_argument('--include-syllables', '-isyl', action='store_true', help='Include syllables in the dataset')
+	parser.add_argument('--norm-resolution', '-nr', type=int, help='Normalize by changing resolution of midi files')
+	parser.add_argument('--music-analysis', '-ma', action='store_true', help='Do music analysis to extract chords, etc.')
 
 	args = parser.parse_args()
 	
@@ -186,8 +202,13 @@ if __name__ == '__main__':
 		 				 output=args.output,
 		 				 workers=args.workers,
 		 				 parquet_for_selected=args.parquet_for_selected,
+		 				 convert_to_parquet=args.convert_to_parquet,
 		 				 include_filenames=not args.no_filenames,
 		 				 include_lyrics=not args.no_lyrics,
 		 				 instrumental_type=args.instrumental_type,
-		 				 convert_to_parquet=args.convert_to_parquet,
-		 				 include_velocity=args.include_velocity)
+		 				 include_velocity=args.include_velocity,
+		 				 include_phonemes=args.include_phonemes,
+		 				 include_vowels=args.include_vowels,
+		 				 include_syllables=args.include_syllables,
+		 				 norm_resolution=args.norm_resolution,
+		 				 music_analysis=args.music_analysis)

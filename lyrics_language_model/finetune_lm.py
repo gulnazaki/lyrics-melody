@@ -70,26 +70,18 @@ def get_arguments():
 class LyricsDataset(Dataset):
     def __init__(self, dataset_file, tokenizer, max_length=1024):
         super().__init__()
-        brackets = re.compile(r'\[.*?\]|\(.*?\)')
-        clean = re.compile(r"-|[^A-Za-z \n']+")
-        space = re.compile(r"\s+")
         
         df = pd.read_parquet(dataset_file)
-        lyrics = [space.sub(" ", clean.sub(lambda match: " " if match.group(0) == "-" else "", brackets.sub("", df['Lyric'][idx]))).lstrip() \
-                                                                     for idx in range(len(df)) if df['Idiom'][idx] == 'ENGLISH']
+        self.lyrics = list(df['Lyrics'])
 
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer, use_fast=True)
 
-        encoded_lyrics = self.batch_encode(lyrics)
-
-        self.max_seq_len = max([len(l) for l in encoded_lyrics])
-        self.mean_seq_len = mean([len(l) for l in encoded_lyrics])
-
-        self.lyrics = [torch.tensor([self.tokenizer.bos_token_id] + l[:max_length - 2] + [self.tokenizer.eos_token_id]) for l in encoded_lyrics]
-
+        self.max_length = max_length
+        self.max_seq_len = 0
+        self.mean_seq_len = 0
 
     def __getitem__(self, index):
-        return (self.lyrics[index])
+        return torch.tensor([self.tokenizer.bos_token_id] + self.tokenizer.encode(self.lyrics[index], max_length=self.max_length - 2, truncation=True) + [self.tokenizer.eos_token_id])
 
     def __len__(self):
         return len(self.lyrics)
@@ -267,12 +259,12 @@ if __name__ == '__main__':
                 # <bos> token
                 initial = torch.full((1,1), dataset.tokenizer.bos_token_id).long()
 
-                outs = [model_engine.module.generate(initial.to(device), seq_len=args.max_seq_len//2, eos_token=dataset.tokenizer.eos_token_id)[0] for _ in range(4)]
-                decoded_outs = '\n'.join(dataset.batch_decode(outs))
-                print(decoded_outs)
+                outs = [model_engine.module.generate(initial.to(device), seq_len=args.max_seq_len - 2, eos_token=dataset.tokenizer.eos_token_id)[0] for _ in range(4)]
+                decoded_outs = '\n--------\n'.join(dataset.batch_decode(outs))
+                # print(decoded_outs)
 
                 with open(os.path.join(args.save_dir, 'outputs.txt'), 'a') as f:
-                    f.write(decoded_outs + '\n\n')
+                    f.write(decoded_outs + '\n--------\n')
 
             if step in saving_steps:
                 loss_to_ckpt = avg_eval_loss if avg_eval_loss is not None else loss.item()

@@ -36,10 +36,9 @@ def extract_enc_lm_dec_kwargs(kwargs):
 def extract_and_set_enc_lm_dec_kwargs(kwargs):
     enc_kwargs, lm_kwargs, dec_kwargs, kwargs = extract_enc_lm_dec_kwargs(kwargs)
     if 'mask' in enc_kwargs:
-        lm_kwargs.setdefault('context_mask', enc_kwargs['mask'])
         dec_kwargs.setdefault('context_mask', enc_kwargs['mask'])
     if 'mask' in lm_kwargs:
-        dec_kwargs.setdefault('second_context_mask', lm_kwargs['mask'])
+        dec_kwargs.setdefault('second_context_mask', lm_kwargs['mask'][:, :-1])
     return enc_kwargs, lm_kwargs, dec_kwargs, kwargs
 
 class DecoupledPerformer(nn.Module):
@@ -48,6 +47,7 @@ class DecoupledPerformer(nn.Module):
         dim,
         tie_token_embeds = False,
         no_projection = False,
+        pretrained_lm = "",
         **kwargs
     ):
         super().__init__()
@@ -59,7 +59,11 @@ class DecoupledPerformer(nn.Module):
         enc_kwargs['no_projection'] = lm_kwargs['no_projection'] = dec_kwargs['no_projection'] = no_projection
 
         lm_kwargs['causal'] = True
-        lm_kwargs['cross_attend'] = True
+        # cross attention has to be set explicitly
+        if not 'cross_attend' in lm_kwargs:
+            lm_kwargs['cross_attend'] = False
+        
+        self.lm_cross_attending = lm_kwargs['cross_attend']
 
         dec_kwargs['causal'] = True
         dec_kwargs['cross_attend'] = True
@@ -73,20 +77,50 @@ class DecoupledPerformer(nn.Module):
             enc.token_emb = lm.token_emb = dec.token_emb
 
         self.enc = enc
+        if pretrained_lm:
+            pretrained = torch.load(pretrained_lm)
+            from collections import OrderedDict
+            new_pretrained = OrderedDict()
+            if lm_kwargs['reversible']:
+                if lm_kwargs['cross_attend']:
+                    for k, v in pretrained.items():
+                        if len(k.split('.')) >= 5:
+                            new_pretrained['performer.net.blocks.{}.{}'.format(int(k.split('.')[3])*2, k.split('.', 4)[-1])] = pretrained[k]
+                        else:
+                            new_pretrained[k] = pretrained[k]
+                else:
+                    new_pretrained = pretrained
+            else:
+                for k, v in pretrained.items():
+                    if len(k.split('.')) >= 5 and k.split('.')[4] == 'f':
+                        new_pretrained['performer.net.layers.{}.0.{}'.format(k.split('.')[3], k.split('.', 6)[-1])] = pretrained[k]
+                    elif len(k.split('.')) >= 5 and k.split('.')[4] == 'g':
+                        new_pretrained['performer.net.layers.{}.{}.{}'.format(k.split('.')[3], 2 if lm_kwargs['cross_attend'] else 1, k.split('.', 6)[-1])] = pretrained[k]
+                    else:
+                        new_pretrained[k] = pretrained[k]
+            lm.load_state_dict(new_pretrained, strict=False)
+            print("Loaded pretrained language model: {}".format(pretrained_lm))
         self.lm = AutoregressiveWrapper(lm)
         self.dec = AutoregressiveWrapper(dec)
 
     @torch.no_grad()
-    def generate(self, instrumental, lyrics_start, lyrics_len, melody_start, melody_len, **kwargs):
+    def generate(self, instrumental, lyrics_start, lyrics_len, vocals_start, vocals_len, **kwargs):
         enc_kwargs, lm_kwargs, dec_kwargs, kwargs = extract_and_set_enc_lm_dec_kwargs(kwargs)
         instrumental_encodings = self.enc(instrumental, return_encodings = True, **enc_kwargs)
-        lyrics_encodings, lyrics = self.lm.generate(lyrics_start, lyrics_len, context = instrumental_encodings, return_also_encodings = True, **{**lm_kwargs, **kwargs})
-        melody = self.dec.generate(melody_start, melody_len, context = instrumental_encodings, second_context = lyrics_encodings, **{**dec_kwargs, **kwargs})
-        return lyrics, melody
+        if self.lm_cross_attending:
+            lm_kwargs.setdefault('context', instrumental_encodings)
+            lm_kwargs.setdefault('context_mask', enc_kwargs['mask'])
+        lyrics_encodings, lyrics = self.lm.generate(lyrics_start, lyrics_len, return_also_encodings = True, **{**lm_kwargs, **kwargs})
+        vocals = self.dec.generate(vocals_start, vocals_len, context = instrumental_encodings, second_context = lyrics_encodings, **{**dec_kwargs, **kwargs})
+        return lyrics, vocals
 
-    def forward(self, instrumental, lyrics, melody, **kwargs):
+    def forward(self, instrumental, lyrics, vocals, **kwargs):
         enc_kwargs, lm_kwargs, dec_kwargs, kwargs = extract_and_set_enc_lm_dec_kwargs(kwargs)
         instrumental_encodings = self.enc(instrumental, return_encodings = True, **enc_kwargs)
-        lyrics_encodings, lyrics_loss = self.lm(lyrics, context = instrumental_encodings, return_also_encodings = True, **lm_kwargs)
-        melody_loss = self.dec(melody, context = instrumental_encodings, second_context = lyrics_encodings, **dec_kwargs)
-        return lyrics_loss + melody_loss
+        if self.lm_cross_attending:
+            lm_kwargs.setdefault('context', instrumental_encodings)
+            lm_kwargs.setdefault('context_mask', enc_kwargs['mask'])
+        lyrics_encodings, lyrics_loss = self.lm(lyrics, return_also_encodings = True, **lm_kwargs)
+        vocals_loss = self.dec(vocals, context = instrumental_encodings, second_context = lyrics_encodings, **dec_kwargs)
+        return lyrics_loss + vocals_loss
+        

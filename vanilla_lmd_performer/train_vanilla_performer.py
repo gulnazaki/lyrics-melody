@@ -4,7 +4,6 @@ import argparse
 import random
 import pandas as pd
 import json
-from tqdm import tqdm
 from allennlp.training.metrics import BLEU
 from itertools import cycle
 from pathlib import Path
@@ -18,7 +17,7 @@ from torch.utils.data import DataLoader, Dataset, random_split
 
 
 def get_arguments():
-    parser=argparse.ArgumentParser(description='Lakh Midi Dataset Instruments-Vocals')
+    parser=argparse.ArgumentParser(description='Train Vanilla Performer on Lakh Midi Dataset Instruments-Lyrics-Vocal Melody')
 
     parser.add_argument('--dataset-file', '-df', type=str, required=True,
                         help='Dataset parquet file')
@@ -32,11 +31,11 @@ def get_arguments():
     parser.add_argument('--monophonic', '-m', default=False, action='store_true',
                         help='Use monophonic instead of full instrumental input')
 
-    parser.add_argument('--max-input-sequence-length', '-maxi', type=int, default=-1,
-                        help='If provided it will skip samples with longer input sequences')
+    parser.add_argument('--max-instrumental-sequence-length', '-maxi', type=int, default=-1,
+                        help='If provided it will truncate samples with longer instrumental sequences')
     
-    parser.add_argument('--max-output-sequence-length', '-maxo', type=int, default=-1,
-                        help='If provided it will skip samples with longer output sequences')
+    parser.add_argument('--max-vocal-sequence-length', '-maxv', type=int, default=-1,
+                        help='If provided it will truncate samples with longer vocal melody sequences')
     
     parser.add_argument('--train-split', '-ts', type=float, default=0.9,
                         help='Percentage of the dataset to use for training')
@@ -71,133 +70,122 @@ def get_arguments():
 
 
 class MidiDataset(Dataset):
-    def __init__(self, dataset_file, monophonic, vocabulary_prefix, max_input_length, max_output_length):
+    def __init__(self, dataset_file, monophonic, vocabulary_prefix, max_instrumental_length, max_vocal_length):
         super().__init__()
-        input_type = 'monophonic' if monophonic else 'instrumental'
+        instrumental_type = 'monophonic' if monophonic else 'instrumental'
         with open('{}instrumental.vocab'.format(vocabulary_prefix), 'r') as f, \
             open('{}vocal.vocab'.format(vocabulary_prefix), 'r') as g: 
-            self.input_vocab = {w : l for l, w in enumerate(f.read().splitlines())}
-            self.reverse_input_vocab = {l: w for w, l in self.input_vocab.items()}
-            self.output_vocab = {w : l for l, w in enumerate(g.read().splitlines())}
-            self.reverse_output_vocab = {l: w for w, l in self.output_vocab.items()}
+            self.instrumental_vocab = {w : l for l, w in enumerate(f.read().splitlines())}
+            self.reverse_instrumental_vocab = {l: w for w, l in self.instrumental_vocab.items()}
+            self.vocal_vocab = {w : l for l, w in enumerate(g.read().splitlines())}
+            self.reverse_vocal_vocab = {l: w for w, l in self.vocal_vocab.items()}
             
-        df = pd.read_parquet(dataset_file, columns=['vocal', input_type])
-        
-        inp = [self.encode(json.loads(f) + ['<eos>'], is_input=True) for f in df[input_type]]
-        out = [self.encode(['<bos>'] + json.loads(f) + ['<eos>'], is_input=False) for f in df['vocal']]
+        df = pd.read_parquet(dataset_file)
 
-        if max_input_length < 0 and max_output_length < 0:
-            self.input = inp
-            self.output = out
-        else:
-            self.input = []
-            self.output = []
-            for idx in range(len(inp)):
-                input_sample = inp[idx]
-                output_sample = out[idx]
-                if (max_input_length >= 0 and len(input_sample) > max_input_length) or \
-                   (max_output_length >= 0 and len(output_sample) > max_output_length):
-                   continue
-                else:
-                    self.input.append(input_sample)
-                    self.output.append(output_sample)
+        self.files = list(df['file'])
+        self.instrumental = [self.encode(json.loads(f), seq_type='instrumental', max_length=max_instrumental_length) for f in df[instrumental_type]]
+        self.vocals = [self.encode(json.loads(v), seq_type='vocals', max_length=max_vocal_length) for v in df['vocal']]
 
-        self.max_input_length = max([len(f) for f in self.input])
-        self.max_output_length = max([len(f) for f in self.output])
+        self.max_instrumental_length = max([len(f) for f in self.instrumental])
+        self.max_vocal_length = max([len(f) for f in self.vocals])
 
 
     def __getitem__(self, index):
-        return (self.input[index], self.output[index])
+        return (self.instrumental[index], self.vocals[index]), self.files[index]
 
     def __len__(self):
-        return len(self.input)
+        return len(self.files)
 
-    def encode(self, event_sequence, is_input):
-        if is_input:
-            return torch.tensor([self.input_vocab[i] for i in event_sequence])
+    def truncate(self, sequence, max_length):
+        if max_length >= 0:
+            return sequence[:max_length]
+        return sequence
+
+    def encode(self, event_sequence, seq_type, max_length=-1):
+        if seq_type == 'instrumental':
+            return torch.tensor([self.instrumental_vocab[e] for e in self.truncate(event_sequence, max_length - 1)] + [self.instrumental_vocab['<eos>']])
         else:
-            return torch.tensor([self.output_vocab[i] for i in event_sequence])
+            return torch.tensor([self.vocal_vocab['<bos>']] + [self.vocal_vocab[e] for e in self.truncate(event_sequence, max_length - 2)] + [self.vocal_vocab['<eos>']])
 
-    def decode(self, event_sequence, is_input, mask=None):
+    def decode(self, event_sequence, seq_type, mask=None):
         size = len(event_sequence)
         if mask is not None:
             mask = mask.tolist()
             true_size = len([v for v in mask if v])
         else:
             true_size = size
-        if is_input:
-            return ",".join([self.reverse_input_vocab[i.item()] for i in event_sequence[:true_size]])
+        if seq_type == 'instrumental':
+            return [self.reverse_instrumental_vocab[i.item()] for i in event_sequence[:true_size]]
         else:
-            return ",".join([self.reverse_output_vocab[o.item()] for o in event_sequence[:true_size]])
+            return [self.reverse_vocal_vocab[o.item()] for o in event_sequence[:true_size]]
 
 
 def collate_fn_zero_pad(batch):
-    inputs, outputs = zip(*batch)
-    batch_size = len(inputs)
+    data, files = zip(*batch)
+    instrumental, vocals = zip(*data)
+    batch_size = len(files)
 
     if batch_size == 1:
-        inputs = inputs[0].view(1, -1)
-        outputs = outputs[0].view(1, -1)
-        input_masks = torch.ones_like(inputs).bool()
-        output_masks = torch.ones_like(outputs).bool()
-        return (inputs.long(), input_masks), (outputs.long(), output_masks)
+        instrumental = instrumental[0].view(1, -1)
+        vocals = vocals[0].view(1, -1)
+        instrumental_masks = torch.ones_like(instrumental).bool()
+        vocal_masks = torch.ones_like(vocals).bool()
+        return (instrumental.long(), instrumental_masks), (vocals.long(), vocal_masks), files[0]
 
-    input_lengths = [seq.size(0) for seq in inputs]
-    input_max_length = max(input_lengths)
-    input_masks = torch.arange(input_max_length).view(1, -1).expand(batch_size, -1) < torch.tensor(input_lengths).view(-1, 1)
-    padded_inputs = torch.zeros(batch_size, input_max_length)
-    for i, l in enumerate(input_lengths):
-        padded_inputs[i, :l] = inputs[i]
+    instrumental_lengths = [seq.size(0) for seq in instrumental]
+    instrumental_max_length = max(instrumental_lengths)
+    instrumental_masks = torch.arange(instrumental_max_length).view(1, -1).expand(batch_size, -1) < torch.tensor(instrumental_lengths).view(-1, 1)
+    padded_instrumental = torch.zeros(batch_size, instrumental_max_length)
+    for i, l in enumerate(instrumental_lengths):
+        padded_instrumental[i, :l] = instrumental[i]
 
-    output_lengths = [seq.size(0) for seq in outputs]
-    output_max_length = max(output_lengths)
-    output_masks = torch.arange(output_max_length).view(1, -1).expand(batch_size, -1) < torch.tensor(output_lengths).view(-1, 1)
-    padded_outputs = torch.zeros(batch_size, output_max_length)
-    for i, l in enumerate(output_lengths):
-        padded_outputs[i, :l] = outputs[i]
+    vocal_lengths = [seq.size(0) for seq in vocals]
+    vocal_max_length = max(vocal_lengths)
+    vocal_masks = torch.arange(vocal_max_length).view(1, -1).expand(batch_size, -1) < torch.tensor(vocal_lengths).view(-1, 1)
+    padded_vocals = torch.zeros(batch_size, vocal_max_length)
+    for i, l in enumerate(vocal_lengths):
+        padded_vocals[i, :l] = vocals[i]
 
-    return (padded_inputs.long(), input_masks), (padded_outputs.long(), output_masks)
+    return (padded_instrumental.long(), instrumental_masks), (padded_vocals.long(), vocal_masks), files
 
 
-def valid_structure_metric(sequence, vocab_size):
-    def get_note(e, on):
-        if on:
-            e -= ons[0]
-            e //= 32
-        else:
-            e -= offs[0]
-        return e + 21
-
-    def get_valids_for_next(e, last_note_on):
+def valid_structure_metric(sequence, vocab):
+    def get_valids_for_next(e, note_was_on):
         if e == waits[-1]:
-            valid_events = waits + offs + syllables + ons
+            valid_events = waits + offs + boundaries + phonemes
         elif e in waits:
-            valid_events = offs + syllables + ons
+            valid_events = offs + boundaries + phonemes
         elif e in ons:
-            last_note_on = get_note(e, on=True)
+            note_was_on = True
             valid_events = waits
         elif e in offs:
-            last_note_on = None
-            valid_events = waits + syllables + ons
+            note_was_on = False
+            valid_events = waits + boundaries + phonemes
+        elif e in boundaries:
+            if e == boundaries[-1]:
+                valid_events = boundaries[:-1] + phonemes
+            else:
+                valid_events = phonemes
         else:
             valid_events = ons
-        return valid_events, last_note_on
+        return valid_events, note_was_on
 
     sequence = sequence.tolist()
-    waits = list(range(3, 1003))
-    ons = list(range(1003, 3819))
-    offs = list(range(3819, 3907))
-    syllables = list(range(3907, vocab_size))
+    waits = [i for e, i in vocab.items() if e[:2] == 'W_']
+    ons = [i for e, i in vocab.items() if e[:3] == 'ON_']
+    offs = [vocab['_OFF_']]
+    boundaries = [vocab[e] for e in ['N_DL', 'N_L', 'N_W', '_C_']]
+    phonemes = [i for e, i in vocab.items() if not '_' in e or e == '_R_']
     
     valid_count = 0
-    valid_events = waits + syllables
-    last_note_on = None
+    valid_events = waits + phonemes + boundaries
+    note_was_on = False
     for e in sequence:
         if e in valid_events and \
-        (e not in ons or last_note_on is None) and \
-        (e not in offs or get_note(e, on=False) == last_note_on):
+        (e not in ons or note_was_on == False) and \
+        (e not in offs or note_was_on == True):
             valid_count += 1
-        valid_events, last_note_on = get_valids_for_next(e, last_note_on)
+        valid_events, note_was_on = get_valids_for_next(e, note_was_on)
 
     size = len(sequence) - 1 if sequence[-1] == 2 else len(sequence)
     if size == 0:
@@ -214,8 +202,8 @@ if __name__ == '__main__':
     dataset = MidiDataset(dataset_file=args.dataset_file,
                           monophonic=args.monophonic,
                           vocabulary_prefix=args.vocabulary_prefix,
-                          max_input_length=args.max_input_sequence_length,
-                          max_output_length=args.max_output_sequence_length)
+                          max_instrumental_length=args.max_instrumental_sequence_length,
+                          max_vocal_length=args.max_vocal_sequence_length)
 
     train_size = int(args.train_split * len(dataset))
     val_size = len(dataset) - train_size
@@ -240,10 +228,10 @@ if __name__ == '__main__':
         dec_depth = 6,
         enc_ff_chunks = 10,
         dec_ff_chunks = 10,
-        enc_num_tokens = len(dataset.input_vocab),
-        dec_num_tokens = len(dataset.output_vocab),
-        enc_max_seq_len = dataset.max_input_length,
-        dec_max_seq_len = dataset.max_output_length,
+        enc_num_tokens = len(dataset.instrumental_vocab),
+        dec_num_tokens = len(dataset.vocal_vocab),
+        enc_max_seq_len = dataset.max_instrumental_length,
+        dec_max_seq_len = dataset.max_vocal_length,
         enc_emb_dropout = 0.1,
         dec_emb_dropout = 0.1,
         enc_ff_dropout = 0.1,
@@ -253,7 +241,7 @@ if __name__ == '__main__':
         enc_tie_embed = True,
         dec_tie_embed = True,
         enc_reversible = True,
-        dec_reversible = True,
+        dec_reversible = True
     ).to(device)
 
     model_engine, optimizer, trainloader, _ = deepspeed.initialize(args=args, model=model, model_parameters=model.parameters(),  training_data=train_dataset, collate_fn=collate_fn_zero_pad)
@@ -273,7 +261,7 @@ if __name__ == '__main__':
         saving_steps.append(save_at)
     saving_steps.append(num_batches - 1)
 
-    print("\n", "Dataset maximum sequence lengths - Input: {}, Output: {}".format(dataset.max_input_length, dataset.max_output_length), "\n")
+    print("\n", "Dataset maximum sequence lengths - Instrumental: {}, Vocal: {}".format(dataset.max_instrumental_length, dataset.max_vocal_length), "\n")
     print("\n", "Train Dataset - size: {}, batches: {}".format(len(train_dataset), num_batches), "\n")
     print("\n", "Validate Dataset - size: {}, batches: {}".format(len(val_dataset), len(val_loader_)), "\n")
 
@@ -295,7 +283,7 @@ if __name__ == '__main__':
             torch.set_rng_state(rng)
             trainloader = iter(trainloader)
             print("Advancing dataloader...")
-            for _ in tqdm(range(step)):
+            for _ in range(step):
                 next(trainloader)
     else:
         print("\nNo checkpoint found, training from scratch\n")
@@ -320,8 +308,11 @@ if __name__ == '__main__':
                 break
 
             model_engine.train()
-            (inp, inp_mask), (out, out_mask) = data
-            loss = model_engine(inp.to(device), out.to(device), enc_mask=inp_mask.to(device), dec_mask=out_mask.to(device), return_loss=True)
+            (instrumental, instrumental_mask), (vocals, vocals_mask), _ = data
+            loss = model_engine(instrumental.to(device),
+                                vocals.to(device),
+                                enc_mask=instrumental_mask.to(device),
+                                dec_mask=vocals_mask.to(device))
             model_engine.backward(loss)
             model_engine.step()
             
@@ -340,8 +331,11 @@ if __name__ == '__main__':
                 with torch.no_grad():
                     running_eval_loss = 0
                     for _ in range(args.validate_size):
-                        (inp, inp_mask), (out, out_mask) = next(val_loader)
-                        loss = model_engine(inp.to(device), out.to(device), return_loss=True, enc_mask=inp_mask.to(device), dec_mask=out_mask.to(device))
+                        (instrumental, instrumental_mask), (vocals, vocals_mask), _ = next(val_loader)
+                        loss = model_engine(instrumental.to(device),
+                                            vocals.to(device),
+                                            enc_mask=instrumental_mask.to(device),
+                                            dec_mask=vocals_mask.to(device))
                         running_eval_loss += loss.item()
                     avg_eval_loss = running_eval_loss / args.validate_size
                     print('\n', f'validation loss: {avg_eval_loss}', '\n')
@@ -350,33 +344,34 @@ if __name__ == '__main__':
                     running_eval_loss = 0
 
             if step % args.generate_every == 0:
-                (inp, inp_mask), (expected_out, expected_out_mask) = next(val_loader)
-                decoded_inp = dataset.decode(inp[0], is_input=True, mask=inp_mask[0])
-                decoded_expected_out = dataset.decode(expected_out[0][1:], is_input=False, mask=expected_out_mask[0][1:])
-                print(decoded_inp)
-                print(decoded_expected_out)
+                (instrumental, instrumental_mask), (expected_vocals, expected_vocals_mask), file = next(val_loader)
+                decoded_expected_vocals = dataset.decode(expected_vocals[0][1:], seq_type='vocals', mask=expected_vocals_mask[0][1:])
 
-                inp = inp[0].view(1, -1)
-                inp_mask = inp_mask[0].view(1, -1)
+                instrumental = instrumental[0].view(1, -1)
+                instrumental_mask = instrumental_mask[0].view(1, -1)
                 
                 # <bos> token
-                initial = torch.ones(1,1).long()
+                vocals_start = torch.ones(1,1).long()
 
-                out = model_engine.module.generate(inp.to(device), initial.to(device), enc_mask=inp_mask.to(device), seq_len=len(expected_out[0]) - 2, eos_token=2)
-                decoded_out = dataset.decode(out[0], is_input=False)
-                print(decoded_out)
+                vocals = model_engine.module.generate(instrumental.to(device),
+                                                      vocals_start.to(device),
+                                                      seq_len=dataset.max_vocal_length//8,
+                                                      enc_mask=instrumental_mask.to(device),
+                                                      eos_token=2)
+                decoded_vocals = dataset.decode(vocals[0], seq_type='vocals')
 
                 with open(os.path.join(args.save_dir, 'outputs.txt'), 'a') as f:
-                    f.write(decoded_inp + "\n" + decoded_expected_out + '\n' + decoded_out + '\n\n')
+                    f.write("{}:\n\n{}\n----------------\n{}\n----------------\n\n"\
+                                    .format(file, decoded_expected_vocals, decoded_vocals))
                 
-                bleu(out.to(device), expected_out[:, 1:].to(device))
+                bleu(vocals.to(device), expected_vocals[:, 1:].to(device))
                 b = bleu.get_metric(reset=True)['BLEU']
-                vsm = valid_structure_metric(out[0], len(dataset.output_vocab))
-                expected_vsm = valid_structure_metric(expected_out[0][1:], len(dataset.output_vocab))
-
                 print("BLEU metric: {}".format(b))
+
+                vsm = valid_structure_metric(vocals[0], dataset.vocal_vocab)
                 print("Valid Structure Metric: {}".format(vsm))
-                print("Expected Valid Structure Metric: {} (for control)".format(expected_vsm))
+                # expected_vsm = valid_structure_metric(expected_vocals[0][1:], dataset.vocal_vocab)
+                # print("Expected Valid Structure Metric: {} (for control)".format(expected_vsm))
                 writer_val.add_scalar("BLEU", b, i)
                 writer_val.add_scalar("VSM", vsm, i)
                 writer_val.flush()
@@ -386,6 +381,8 @@ if __name__ == '__main__':
                 ckpt_id = "{}-{}-{}".format(e + epoch, i, loss_to_ckpt)
                 model_engine.save_checkpoint(args.save_dir, tag=ckpt_id, client_state = {'i': i, 'step': step, 'epoch': e + epoch})
                 torch.save(rng, os.path.join(args.save_dir, 'rng_state.pt'))
+                torch.save(model_engine.module.state_dict(), os.path.join(args.save_dir, 'model.pt'))
 
             i += 1
             step += 1
+            
