@@ -278,14 +278,37 @@ class Midi(pretty_midi.PrettyMIDI):
 		write(save if save else "{}-{}.wav".format('instruments&vocals' if instruments and vocals else 'instruments' if instruments else 'vocals',
 				os.path.split(self.midi_file)[-1].split('.')[0]), fs, synthesized)
 
-	def text_events_tick_to_time(self, event_list):
+	def text_events_tick_to_time(self, event_list, return_also_lyrics, roman_numerals):
 		events_with_time = []
 		for e in event_list:
-			if e.split('_')[0] == 'W':
+			if e[:2] == 'W_':
 				events_with_time.append('W_{}'.format(self.norm_tick_to_time(int(e.split('_')[1]))))
+			elif roman_numerals and e[:3] == 'ON_':
+				assert self.key
+				pitch = music21.roman.RomanNumeral(e[3:-1], self.key).root().midi
+				octave = int(e[-1]) - self.key.tonic.midi//12 + 1
+				pitch += octave*12
+				events_with_time.append('ON_{}'.format(pitch))
 			else:
 				events_with_time.append(e)
-		return events_with_time
+		if not return_also_lyrics:
+			return events_with_time
+		lyrics = []
+		for e in event_list:
+			if not '_' in e:
+				if lyrics and lyrics[-1].isupper():
+					lyrics[-1] += ' ' + e
+				else:
+					lyrics.append(e)
+			elif e == '_C_':
+				lyrics.append(',')
+			elif e == 'N_DL':
+				lyrics.append('\n\n')
+			elif e == 'N_L':
+				lyrics.append('\n')
+			elif e == 'N_W':
+				lyrics.append(' ')
+		return events_with_time, lyrics
 
 	def get_music21_score(self, instruments=None):
 		if instruments is not None:
@@ -351,15 +374,14 @@ def merge_lyrics_with_vocal_events(lyrics, text_events, phonemodel='cmudict-2017
 
 	merged_events = []
 	for t in text_events:
-		if not '_' in t:
+		if t[:3] == 'ON_' and merged_events and merged_events[-1] != '_R_':
 			if lyrics_events:
 				merged_events.append(lyrics_events.pop(0))
 			else:
 				break
-		else:
-			merged_events.append(t)
+		merged_events.append(t)
 
-	return merged_events	
+	return merged_events
 
 def simplify_enharmonics_fast(chord, key):
 	chord.closedPosition(inPlace=True)
