@@ -6,7 +6,7 @@ It has been currently accepted at the 2nd Workshop on NLP for Music and Spoken A
 
 It includes:
 - All code to recreate the results of the paper
-- The reduced chord dataset `dataset_chords.parquet` (the full instrumental dataset was not included due to its large size)
+- The full instrumental dataset `dataset.parquet` and the reduced chord dataset `dataset_chords.parquet`
 - A few generated samples and their corresponding lyrics
 
 
