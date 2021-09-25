@@ -2,9 +2,7 @@ checkpoints/
 outputs/
 summaries/
 *.csv
-*.parquet
 *.pt
-*.fst
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
