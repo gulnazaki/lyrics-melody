@@ -36,10 +36,10 @@ class Midi(pretty_midi.PrettyMIDI):
 					self._create_sung_lyrics()
 					self._trim_overlapped_vocals()
 					self._syllablify(Phonetisaurus(phonemodel))
-					if music_analysis:
-						self.key = self.get_music21_score([i for i in self.instruments if not i.is_drum]).analyze('key')
-					else:
-						self.key = None
+			if music_analysis:
+				self.key = self.get_music21_score([i for i in self.instruments if not i.is_drum]).analyze('key')
+			else:
+				self.key = None
 
 	def _reclassify_lyrics_and_text(self):
 		fix_special_chars(self.lyrics)
