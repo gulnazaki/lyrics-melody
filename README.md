@@ -22,3 +22,7 @@ The provided code includes scripts to:
 - warm-start and finetune the lyrics language model
 - adjust Mellotron in order to use our text event format
 - train all models and generate samples on Colab (Jupyter Notebooks)
+
+## Data
+
+Since the git lfs free data limit has been reached, here is a [link](https://drive.google.com/drive/folders/1urzEY2Iu16-2TRUpvGjhjXjugRuIVLuf?usp=sharing) for a Google Drive folder containing the necessary data.
